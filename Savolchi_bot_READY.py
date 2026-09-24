@@ -529,6 +529,69 @@ async def process_correct(message: Message, state: FSMContext):
         await message.answer("Xatolik yuz berdi!")
 
 
+# --- PDF PARSER (qatorma-qator) ---
+Q_RE = re.compile(r'^\s*(\d{1,4})\s*[\.\)]\s*(.+)$')
+OPT_RE = re.compile(r'^\s*([ABVGDАБВГДabvgd])\s*[\)\.]\s*(.*)$')
+ANS_RE = re.compile(r'^\s*T?o.?g.?ri\s+javob\s*:?\s*(.*)$', re.IGNORECASE)
+LETTERS = {"A": 0, "B": 1, "V": 2, "G": 3, "D": 4, "C": 2,
+           "А": 0, "Б": 1, "В": 2, "Г": 3, "Д": 4}
+
+
+def clean(s):
+    s = s.replace('ѐ', 'yo')
+    s = re.sub(r'\s+', ' ', s).strip()
+    s = re.sub(r'\(\s*\d+(?:-\d+)*-?\s*modda(?:lar)?\s*\)', '', s, flags=re.I).strip()
+    return s
+
+
+def parse_questions(text):
+    """Qaytaradi: (savollar_ro'yxati, muammolar_ro'yxati)"""
+    lines = [l for l in text.split('\n')
+             if l.strip() and not re.fullmatch(r'\s*\d+\s*', l)  # sahifa raqami
+             and not re.search(r'TESTLAR\s*-\s*SAVOLLAR', l, re.I)]  # sarlavha
+    blocks, cur = [], None
+    for l in lines:
+        m = Q_RE.match(l)
+        if m and (cur is None or cur['state'] in ('ans', 'opt')) and not OPT_RE.match(l):
+            if cur: blocks.append(cur)
+            cur = {'num': int(m.group(1)), 'q': m.group(2), 'opts': [], 'ans': None, 'state': 'q'}
+            continue
+        if cur is None:
+            continue
+        a = ANS_RE.match(l)
+        if a:
+            val = a.group(1).strip()
+            lm = re.match(r'([ABVGDАБВГДabvgd])\b', val)
+            cur['ans'] = LETTERS.get(lm.group(1).upper()) if lm else None
+            cur['state'] = 'ans'
+            continue
+        o = OPT_RE.match(l)
+        if o and cur['state'] in ('q', 'opt'):
+            cur['opts'].append(o.group(2))
+            cur['state'] = 'opt'
+            continue
+        # davomi (ko'p qatorli matn)
+        if cur['state'] == 'q':
+            cur['q'] += ' ' + l
+        elif cur['state'] == 'opt':
+            cur['opts'][-1] += ' ' + l
+    if cur: blocks.append(cur)
+
+    result, problems = [], []
+    for b in blocks:
+        opts = [clean(o) for o in b['opts']]
+        q = clean(b['q'])
+        if len(opts) < 2:
+            problems.append(f"{b['num']}-savol: variantlar topilmadi");
+            continue
+        if b['ans'] is None or b['ans'] >= len(opts):
+            problems.append(f"{b['num']}-savol: to'g'ri javob ko'rsatilmagan");
+            continue
+        opts = (opts + ["Berilmagan"] * 4)[:4]
+        result.append({'num': b['num'], 'question': q, 'options': opts, 'correct': b['ans']})
+    return result, problems
+
+
 # --- PDF YUKLASH ---
 @dp.callback_query(F.data == "admin_add_pdf")
 async def add_pdf_start(callback: CallbackQuery, state: FSMContext):
@@ -560,60 +623,24 @@ async def process_pdf(message: Message, state: FSMContext):
             if t:
                 full_text += t + "\n"
 
-        pattern = re.compile(
-            r"(?:\n|^)\s*\d+[\.\)]\s*(.*?)(?=\n\s*[A-Aa-a][\)\.]\s*|$)"
-            r"(?:\n\s*[A-Aa-a][\)\.]\s*(.*?)(?=\n\s*[B-Bb-b][\)\.]\s*|$))?"
-            r"(?:\n\s*[B-Bb-b][\)\.]\s*(.*?)(?=\n\s*[C-Cc-c][\)\.]\s*|$))?"
-            r"(?:\n\s*[C-Cc-c][\)\.]\s*(.*?)(?=\n\s*[D-Dd-d][\)\.]\s*|$))?"
-            r"(?:\n\s*[D-Dd-d][\)\.]\s*(.*?)(?=\n|$))?"
-            r"(?:.*?(?:javob|Javob|JAVOB)\s*:\s*([A-Da-d]))?",
-            re.DOTALL | re.IGNORECASE
-        )
+        questions, problems = parse_questions(full_text)
 
         with get_db() as db:
             cursor = db.cursor()
             count = 0
-            letter_map = {"A": 0, "a": 0, "B": 1, "b": 1, "C": 2, "c": 2, "D": 3, "d": 3}
-
-            for match in pattern.finditer(full_text):
-                groups = match.groups()
-                q_raw = groups[0].strip() if groups[0] else ""
-                a_raw = groups[1].strip() if groups[1] else ""
-                b_raw = groups[2].strip() if groups[2] else ""
-                c_raw = groups[3].strip() if groups[3] else ""
-                d_raw = groups[4].strip() if groups[4] else ""
-                ans_letter = groups[5] if groups[5] else None
-
-                if len(q_raw) < 5 or re.match(r"^javob\s*:", q_raw, re.IGNORECASE):
-                    continue
-
-                opts = [a_raw, b_raw, c_raw, d_raw]
-
-                correct_idx = 0
-                if ans_letter and ans_letter in letter_map:
-                    correct_idx = letter_map[ans_letter]
-                else:
-                    for idx, opt in enumerate(opts):
-                        if "+" in opt or "*" in opt:
-                            correct_idx = idx
-                            break
-
-                clean_opts = []
-                for opt in opts:
-                    opt = re.sub(r"(?:javob|Javob)\s*:\s*[A-Da-d].*", "", opt, flags=re.IGNORECASE)
-                    opt = re.sub(r"\(\d+-\d+-modda\)", "", opt, flags=re.IGNORECASE)
-                    opt = opt.replace("+", "").replace("*", "").strip()
-                    if len(opt) < 3:
-                        opt = "Berilmagan"
-                    clean_opts.append(opt)
-
+            for q in questions:
+                o = q['options']
                 cursor.execute(
                     """INSERT INTO questions (question, option_a, option_b, option_c, option_d, correct)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (q_raw, clean_opts[0], clean_opts[1], clean_opts[2], clean_opts[3], correct_idx)
+                    (q['question'], o[0], o[1], o[2], o[3], q['correct'])
                 )
                 count += 1
-                db.commit()
+            db.commit()
+
+        if problems:
+            report = "\n".join(problems[:20])
+            await message.answer(f"⚠️ <b>O'tkazib yuborilgan savollar ({len(problems)} ta):</b>\n{report}")
 
         if os.path.exists(file_path):
             os.remove(file_path)
