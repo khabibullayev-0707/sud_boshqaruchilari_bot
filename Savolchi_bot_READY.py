@@ -477,14 +477,11 @@ async def admin_all_questions_handler(callback: CallbackQuery):
 
         text = f"📜 <b>Savollar ({offset + 1}-{min(offset + limit, total_q)} / Jami {total_q}):</b>\n\n"
         for q in questions:
+            # Avval qisqartiramiz, keyin escape qilamiz — HTML teglar buzilmaydi
             opts = [q['option_a'], q['option_b'], q['option_c'], q['option_d']]
-            block = f"<b>{q['id']}. {escape(q['question'])}</b>\n"
-            block += "".join(f"{LETTERS[i]}) {escape(opts[i])}\n" for i in range(4))
+            block = f"<b>{q['id']}. {escape(shorten(q['question'], 500))}</b>\n"
+            block += "".join(f"{LETTERS[i]}) {escape(shorten(opts[i], 150))}\n" for i in range(4))
             block += f"✅ To'g'ri javob: <b>{LETTERS[q['correct']]}</b>\n\n"
-            if len(text) + len(block) > MSG_LIMIT:
-                block = shorten(block, max(200, MSG_LIMIT - len(text)))
-                text += block
-                break
             text += block
 
         nav = []
@@ -493,7 +490,7 @@ async def admin_all_questions_handler(callback: CallbackQuery):
         if offset + limit < total_q:
             nav.append(InlineKeyboardButton(text="Keyingi ➡️", callback_data=f"admin_all_questions_{page + 1}"))
         kb = ([nav] if nav else []) + [[InlineKeyboardButton(text="🔙 Bosh menyu", callback_data="admin_main_menu")]]
-        await safe_edit(callback, text[:4090], InlineKeyboardMarkup(inline_keyboard=kb))
+        await safe_edit(callback, text, InlineKeyboardMarkup(inline_keyboard=kb))
     except Exception as e:
         logger.error(f"All questions xatoligi: {e}")
         await callback.message.answer("❌ Savollarni ko'rsatishda xatolik yuz berdi.", reply_markup=admin_menu())
